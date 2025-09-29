@@ -1,12 +1,7 @@
+use crate::errors::{WireError, MessageSerdeError};
+
 pub const MAX_SUBJECT_SIZE: usize = 255;
 pub const MAX_PAYLOAD_SIZE: usize = 1_048_576;
-
-#[derive(Debug)]
-pub enum MessageSerdeError {
-    SubjectTooLong { expected: usize, got: usize },
-    MessageTooLong { expected: usize, got: usize },
-    IncompleteMessage { expected: usize, got: usize },
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Message<'a> {
@@ -15,57 +10,57 @@ pub struct Message<'a> {
 }
 
 impl<'a> Message<'a> {
-    pub fn from_bytes(buf: &'a [u8]) -> Result<Self, MessageSerdeError> {
+    pub fn from_bytes(buf: &'a [u8]) -> Result<Self, WireError> {
         if buf.len() < 5 {
             return Err(MessageSerdeError::IncompleteMessage {
                 expected: 5,
                 got: buf.len(),
-            });
+            }.into());
         }
 
         // first byte is the length of the subject
-        let subject_len = buf[0] as usize;
+        let subject_len = buf[1] as usize;
         if subject_len > MAX_SUBJECT_SIZE {
             return Err(MessageSerdeError::SubjectTooLong {
                 expected: MAX_SUBJECT_SIZE,
                 got: subject_len,
-            });
+            }.into());
         }
         // next 4 bytes is the length of the message, capped at 1MB
-        let msg_len = usize::from_le_bytes(buf[1..5].try_into().unwrap());
+        let msg_len = usize::from_le_bytes(buf[2..6].try_into().unwrap());
         if msg_len > MAX_PAYLOAD_SIZE {
             return Err(MessageSerdeError::MessageTooLong {
                 expected: MAX_PAYLOAD_SIZE,
                 got: msg_len,
-            });
+            }.into());
         }
         if 5 + subject_len + msg_len != buf.len() {
             return Err(MessageSerdeError::IncompleteMessage {
                 expected: 5 + subject_len + msg_len,
                 got: buf.len(),
-            });
+            }.into());
         }
-        let subject = &buf[5..(5 + subject_len)];
-        let message = &buf[(5 + subject_len)..buf.len()];
+        let subject = &buf[6..(6 + subject_len)];
+        let message = &buf[(6 + subject_len)..buf.len()];
         Ok(Message {
             subject,
             payload: message,
         })
     }
 
-    pub fn to_bytes(&self, buf: &mut Vec<u8>) -> Result<(), MessageSerdeError> {
+    pub fn to_bytes(&self, buf: &mut Vec<u8>) -> Result<(), WireError> {
         if self.subject.len() > MAX_SUBJECT_SIZE {
             return Err(MessageSerdeError::SubjectTooLong {
                 expected: MAX_SUBJECT_SIZE,
                 got: self.subject.len(),
-            });
+            }.into());
         }
 
         if self.payload.len() > MAX_PAYLOAD_SIZE {
             return Err(MessageSerdeError::MessageTooLong {
                 expected: MAX_PAYLOAD_SIZE,
                 got: self.payload.len(),
-            });
+            }.into());
         }
         buf.push(self.subject.len() as u8);
         buf.extend(&(self.payload.len() as u32).to_le_bytes());

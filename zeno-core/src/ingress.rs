@@ -1,70 +1,89 @@
-use std::{io::Read, net::{TcpListener, TcpStream}, thread, sync::Arc};
+
+use std::{sync::{Arc, mpsc}, net::{TcpListener, TcpStream}, thread, io::Read};
+use zeno_proto::{client_commands::ClientCommand};
 use crate::wal::WriteAheadLog;
 
-use zeno_proto::publish::Message;
-pub struct TcpIngress {
-    listener: TcpListener
-}
+pub fn start_pool(addr: &str, wal: Arc<WriteAheadLog>, workers: usize) {
+    let listener = TcpListener::bind(addr).unwrap();
+    let mut senders = Vec::new();
 
-impl TcpIngress {
-    pub fn new(connection: String) -> Self {
-        let listener = TcpListener::bind(connection).unwrap();
-        TcpIngress { listener }
-    }
+    for _ in 0..workers {
+        let (tx, rx) = mpsc::channel::<TcpStream>();
+        senders.push(tx);
+        let wal = Arc::clone(&wal);
+        thread::spawn(move || worker_loop(rx, wal));
+    };
 
-    pub fn listen(self, log: Arc<WriteAheadLog>) 
-    {
-        for stream in self.listener.incoming() {
-            let stream = stream.unwrap();
-            let log = Arc::clone(&log);
-            thread::spawn(move || {
-                handle_connection(stream, log); 
-            });
-        }
-    }
+    let mut next = 0;
+    for stream in listener.incoming() {
+        let stream = stream.unwrap();
+        senders[next].send(stream).unwrap();
+        next = (next + 1) % workers;
+    };
 }
 
 
-fn handle_connection(mut stream: TcpStream, log: Arc<WriteAheadLog>) {
-    let mut buf = vec![0u8; 1024 * 1024];
-    let mut pending = Vec::new();
+fn worker_loop(rx: mpsc::Receiver<TcpStream>, log: Arc<WriteAheadLog>) {
+    let mut connections = Vec::new();
 
     loop {
-        match stream.read(&mut buf) {
-            Ok(0) => break, // connection closed
-            Ok(n) => {
-                pending.extend_from_slice(&buf[..n]);
+        // pick up new connections
+        while let Ok(stream) = rx.try_recv() {
+            connections.push(Connection::new(stream));
+        }
 
-                let mut offset = 0;
-                while offset + 5 <= pending.len() {
-                    let subject_len = pending[offset] as usize;
-                    let payload_len =
-                        u32::from_le_bytes(pending[offset + 1..offset + 5].try_into().unwrap())
-                            as usize;
-
-                    let total_len = 5 + subject_len + payload_len;
-
-                    if offset + total_len > pending.len() {
-                        break;
-                    }
-
-                    let subject =
-                        &pending[offset + 5..offset + 5 + subject_len];
-                    let payload =
-                        &pending[offset + 5 + subject_len..offset + total_len];
-
-                    let msg = Message { subject, payload };
-                    log.write_new_message(msg).unwrap();
-
-                    offset += total_len;
-                }
-
-                pending.drain(..offset);
-            }
-            Err(e) => {
-                eprintln!("error reading from stream: {e}");
-                break;
+        // service connections
+        for conn in &mut connections {
+            if let Err(e) = conn.read_and_process( &log) {
+                eprintln!("connection closed: {e}");
             }
         }
     }
 }
+
+struct Connection {
+    stream: TcpStream,
+    pending: Vec<u8>,
+}
+
+impl Connection {
+    fn new(stream: TcpStream) -> Self {
+        Self { stream, pending: Vec::new() }
+    }
+
+    fn read_and_process(&mut self, wal: &Arc<WriteAheadLog>) -> std::io::Result<()> {
+        let mut buf = [0u8; 4096];
+        let n = self.stream.read(&mut buf)?;
+        if n == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "closed"));
+        }
+        self.pending.extend_from_slice(&buf[..n]);
+
+        let mut offset = 0;
+        while let Ok((cmd, consumed)) = ClientCommand::try_parse(&self.pending[offset..]) {
+            offset += consumed;
+
+            handle_command(cmd, &wal);
+        }
+
+        if offset > 0 {
+            self.pending.drain(..offset);
+        }
+
+        Ok(())
+    }
+}
+
+
+fn handle_command(cmd: ClientCommand, wal: &Arc<WriteAheadLog>) {
+    match cmd {
+        ClientCommand::Publish(msg) => {
+            wal.write_new_message(msg).unwrap();
+        }
+        ClientCommand::CreateConsumer(cc) => {
+            println!("new consumer: {:?}", cc);
+            // TODO: call ConsumerManager
+        }
+    }
+}
+
