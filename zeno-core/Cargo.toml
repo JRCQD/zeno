@@ -6,5 +6,4 @@ edition = "2024"
 [dependencies]
 affinity = "0.1.2"
 memmap2 = "0.9.8"
-tokio = "1.47.1"
 zeno-proto={path="../zeno-proto"}

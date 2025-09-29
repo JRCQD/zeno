@@ -10,7 +10,6 @@ pub enum ConsumerMode {
 pub struct Pull;
 pub struct Push;
 
-
 pub struct ConsumerWorker<'a, Mode> {
     subject: &'a [u8],
     mmap: &'a [u8],
@@ -40,7 +39,7 @@ impl<'a> ConsumerWorker<'a, Pull> {
                         output.push(msg);
                     }
                 }
-                Err(_) => break
+                Err(_) => break,
             }
         }
         output
@@ -76,7 +75,5 @@ impl<'a> ConsumerWorker<'a, Pull> {
 }
 
 impl<'a> ConsumerWorker<'a, Push> {
-    pub fn handle_message(&mut self, _msg: &Message) {
-
-    }
+    pub fn handle_message(&mut self, _msg: &Message) {}
 }
